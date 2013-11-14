@@ -1,5 +1,4 @@
-
-    
+#!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
 '''
@@ -7,7 +6,7 @@
 :author: Emil Rozbicki <emil@glencoesoftware.com>
 :author: Chris Allan <callan@glencoesoftware.com>
 
-Simple segmentation using OpenCV and OMERO
+Simple matplotlib routines
 Copyright (C) 2013 Glencoe Software, Inc.
 All rights reserved.
 
@@ -52,7 +51,7 @@ img2ThreshVal = 0.7
 minCellSize = 20
 maxCellSize = 70
 pi = 3.14159265359
-log = logging.getLogger('gs.segmentation_simple')
+
 NS = 'openmicroscopy.org/omero/bulk_annotations'
 #NS = 'openmicroscopy.org/omero/measurement'
 
@@ -62,11 +61,17 @@ IMAGE_QUERY = 'select i from Image as i ' \
               'join fetch i.wellSamples as ws ' \
               'join fetch ws.well as w ' \
               'join fetch w.plate '
-              
+
+LOGGING_FORMAT = '%(asctime)s %(levelname)-7s [%(name)16s] %(message)s'
+
+log = logging.getLogger('gs.table-plot')
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('-s', '--server', help='OMERO server name')
-    parser.add_argument('-p', '--port', type=int, help='OMERO server port')
+    parser.add_argument(
+        '-p', '--port', type=int, help='OMERO server port', default=4064
+    )
     parser.add_argument('-u', '--username', help='OMERO username')
     parser.add_argument('-k', '--session_key', help='OMERO session key')
     parser.add_argument(
@@ -88,7 +93,7 @@ def main():
         args.password = getpass("OMERO password for '%s': " % args.username)
     elif args.username is None and args.session_key is None:
         parser.error('Username or session key must be provided!')
-    logging.basicConfig(level=args.logging_level)
+    logging.basicConfig(format=LOGGING_FORMAT, level=args.logging_level)
 
     client = connect(args)
     try:
@@ -107,7 +112,6 @@ def connect(args):
     return client
 
 def get_table(client, args):
-    '''Retrieves the OMERO.tables instance backing our results.'''
     '''Retrieves the OMERO.tables instance backing our results.'''
     session = client.getSession()
     query_service = session.getQueryService()
@@ -132,8 +136,6 @@ def get_table(client, args):
         log.info('Using existing table: %d' % table_original_file_id)
         return table
     return 
-    
-   
 
 def get_column(matrix, columnIndex):
      return [row[columnIndex] for row in matrix]
@@ -151,14 +153,13 @@ def plot(client, args, table):
         (v.name, {'column': v, 'index': i}) for i, v in enumerate(columns)
     ])
     number_of_rows = table.getNumberOfRows()
-    print number_of_rows
+    log.info('Number of rows: %d' % number_of_rows)
     data = table.read([columns_by_name['Image']['index']], 0, number_of_rows)
     #print columns_by_name.keys()
     image_ids = set(data.columns[0].values)
-    print 'No Images', len(image_ids)
+    log.info('Number of Images: %d' % len(image_ids))
     #print 'Images: %r' % image_ids
     #print len(data.columns[columns_by_name['polygonArea']['index']].values)
-    
     number_of_images  = 400 #len(image_ids)
     bins = range(number_of_images)
     radii = np.ones(2 * number_of_images)
@@ -189,4 +190,3 @@ def plot(client, args, table):
     
 if __name__ == '__main__':
     main()
-    #run_analyser()
