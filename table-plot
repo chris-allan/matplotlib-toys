@@ -91,6 +91,10 @@ def main():
         help='Column to group values by'
     )
     parser.add_argument(
+        '--cell_count', action='store_true', default=False,
+        help='Add a cell count plot'
+    )
+    parser.add_argument(
         '--histogram', action='append', default=list(),
         help='Plot a histogram for the column'
     )
@@ -199,6 +203,8 @@ class Analyser(object):
 
     def plot(self):
         metric_columns = self.args.histogram + self.args.polar
+        if self.args.cell_count and self.args.group_by == 'Well':
+            metric_columns += ['Image']
         if len(metric_columns) == 0:
             log.error('Select at least one column to plot!')
             return
@@ -236,7 +242,7 @@ class Analyser(object):
             group_by_column_ids, group = \
                 self.group_by(group_by_column, data.columns[index + 1])
             polar = column_name in self.args.polar
-            plt.subplot(subplot, polar=polar)
+            axis = plt.subplot(subplot, polar=polar)
             plt.xlabel(group_by)
             x_labels = [
                 self.well_names_by_id[v] for v in group_by_column_ids
@@ -254,10 +260,15 @@ class Analyser(object):
                         width=width)
             else:
                 plt.grid()
+
+                if column_name == 'Image':
+                    func = len
+                else:
+                    func = np.average
                 histogram_data = [
                     (
                         self.well_names_by_id[group_by_column_ids[index]],
-                        np.average(v)
+                        func(v)
                     )
                     for index, v in enumerate(group)
                 ]
@@ -268,10 +279,24 @@ class Analyser(object):
                 x_labels = histogram_data[group_by].flatten()
                 histogram_data = histogram_data[column_name].flatten()
 
+                class Formatter(object):
+                    def __init__(self, x_labels):
+                        self.x_labels = x_labels
+
+                    def format(self, x):
+                        try:
+                            return self.x_labels[int(x)]
+                        except:
+                            return ''
+                axis.fmt_xdata = Formatter(x_labels).format
+
                 plt.bar(bins, histogram_data, color='red', edgecolor='red',
-                        align='center', width=width)
+                        align='edge', width=width)
                 plt.xticks(bins[::12], x_labels[::12])
-            plt.title(column_name)
+            if column_name == 'Image':
+                plt.title('Cell Count')
+            else:
+                plt.title(column_name)
         plt.show()
     
 if __name__ == '__main__':
