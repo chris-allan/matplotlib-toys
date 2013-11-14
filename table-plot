@@ -1,0 +1,192 @@
+
+    
+# -*- coding: utf-8 -*-
+
+'''
+
+:author: Emil Rozbicki <emil@glencoesoftware.com>
+:author: Chris Allan <callan@glencoesoftware.com>
+
+Simple segmentation using OpenCV and OMERO
+Copyright (C) 2013 Glencoe Software, Inc.
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer.
+2. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS 'AS IS' AND
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
+ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+'''
+import argparse
+import logging
+from getpass import getpass
+import omero
+import omero.clients
+from omero.model import OriginalFileI, PlateI, PlateAnnotationLinkI, ImageI, \
+                        FileAnnotationI, RoiI, PointI
+import csv
+import numpy as np
+import cv2
+import cv2.cv as cv
+import os
+import os.path
+from matplotlib import pyplot as plt
+import time
+
+img2ThreshVal = 0.7
+minCellSize = 20
+maxCellSize = 70
+pi = 3.14159265359
+log = logging.getLogger('gs.segmentation_simple')
+NS = 'openmicroscopy.org/omero/bulk_annotations'
+#NS = 'openmicroscopy.org/omero/measurement'
+
+IMAGE_QUERY = 'select i from Image as i ' \
+              'join fetch i.pixels as p ' \
+              'join fetch p.pixelsType ' \
+              'join fetch i.wellSamples as ws ' \
+              'join fetch ws.well as w ' \
+              'join fetch w.plate '
+              
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-s', '--server', help='OMERO server name')
+    parser.add_argument('-p', '--port', type=int, help='OMERO server port')
+    parser.add_argument('-u', '--username', help='OMERO username')
+    parser.add_argument('-k', '--session_key', help='OMERO session key')
+    parser.add_argument(
+        '-v', '--verbose', action='store_const', dest='logging_level',
+        const=logging.DEBUG, default=logging.INFO,
+        help='Enable more verbose logging'
+    )
+    parser.add_argument(
+        '-d', '--debug', action='store_true', default=False,
+        help='Turn on debugging'
+    )
+    parser.add_argument(
+        'object_id',
+        help='OMERO object or container to analyse (ex. Image:1)'
+    )
+
+    args = parser.parse_args()
+    if args.username and args.session_key is None:
+        args.password = getpass("OMERO password for '%s': " % args.username)
+    elif args.username is None and args.session_key is None:
+        parser.error('Username or session key must be provided!')
+    logging.basicConfig(level=args.logging_level)
+
+    client = connect(args)
+    try:
+        run_analyser(client, args)
+    finally:
+        client.closeSession()
+        
+def connect(args):
+    client = omero.client(args.server, args.port)
+    if args.username is not None:
+        session = client.createSession(args.username, args.password)
+    else:
+        session = client.joinSession(args.session_key)
+    ec = session.getAdminService().getEventContext()
+    log.debug('Session key: %s' % ec.sessionUuid)
+    return client
+
+def get_table(client, args):
+    '''Retrieves the OMERO.tables instance backing our results.'''
+    '''Retrieves the OMERO.tables instance backing our results.'''
+    session = client.getSession()
+    query_service = session.getQueryService()
+    sr = session.sharedResources()
+    ctx = {'omero.group': '-1'}
+    plate_id = long(args.object_id.split(':')[1])
+    params = omero.sys.ParametersI()
+    params.addString('ns', NS)
+    params.addId(plate_id)
+    plate = query_service.findByQuery(
+        'select p from Plate as p ' \
+        'join fetch p.annotationLinks as a_link ' \
+        'join fetch a_link.child as a ' \
+        'where a.ns = :ns and p.id = :id ',
+        params, ctx
+    )
+    if plate is not None:
+        print 'got the plate'
+        file_annotation = next(plate.iterateAnnotationLinks()).child
+        table_original_file_id = file_annotation.file.id.val
+        table = sr.openTable(OriginalFileI(table_original_file_id, False))
+        log.info('Using existing table: %d' % table_original_file_id)
+        return table
+    return 
+    
+   
+
+def get_column(matrix, columnIndex):
+     return [row[columnIndex] for row in matrix]
+    
+def run_analyser(client, args):
+    table = get_table(client,args)
+    try:
+        plot(client, args, table)
+    finally:
+        table.close()
+
+def plot(client, args, table):    
+    columns = table.getHeaders()
+    columns_by_name = dict([
+        (v.name, {'column': v, 'index': i}) for i, v in enumerate(columns)
+    ])
+    number_of_rows = table.getNumberOfRows()
+    print number_of_rows
+    data = table.read([columns_by_name['Image']['index']], 0, number_of_rows)
+    #print columns_by_name.keys()
+    image_ids = set(data.columns[0].values)
+    print 'No Images', len(image_ids)
+    #print 'Images: %r' % image_ids
+    #print len(data.columns[columns_by_name['polygonArea']['index']].values)
+    
+    number_of_images  = 400 #len(image_ids)
+    bins = range(number_of_images)
+    radii = np.ones(2 * number_of_images)
+    width = 0.8
+    histPolyArea = []
+    histExentricity = []
+    histOrientation = []
+    histMeanIntCh1 = []
+    histMeanIntCh2 = []
+    
+    for i in range(number_of_images): 
+        print i,
+        rows = table.getWhereList('Image==%s' % image_ids.pop(), dict(), 0, number_of_rows, 0)
+        data = table.readCoordinates(rows)        
+        histPolyArea.append(np.average(data.columns[columns_by_name['polygonArea']['index']].values))
+        histExentricity.append(np.average(data.columns[columns_by_name['excentricity']['index']].values))
+        histOrientation.append((pi / 180) * np.average(data.columns[columns_by_name['orientation']['index']].values))
+        histOrientation.append(pi + (pi / 180) * np.average(data.columns[columns_by_name['orientation']['index']].values))        
+        histMeanIntCh1.append(np.average(data.columns[columns_by_name['meanCh1']['index']].values))
+        histMeanIntCh2.append(np.average(data.columns[columns_by_name['meanCh2']['index']].values))
+          
+    plt.subplot(231),plt.bar(bins, histPolyArea, color='r',align='center', width=width),plt.title('Avg Area')
+    plt.subplot(232),plt.bar(bins, histExentricity, color='r',align='center', width=width),plt.title('Avg Excentricity')
+    plt.subplot(233, polar=True),plt.bar(histOrientation, radii, color='r',align='center', width=pi/72),plt.title('Mean Orientation')
+    plt.subplot(234),plt.bar(bins, histMeanIntCh1, color='r',align='center', width=width),plt.title('Avg Intenisty Ch1')
+    plt.subplot(235),plt.bar(bins, histMeanIntCh2, color='r',align='center', width=width),plt.title('Avg Int Ch2 (coloc)')
+    plt.show()
+    
+if __name__ == '__main__':
+    main()
+    #run_analyser()
