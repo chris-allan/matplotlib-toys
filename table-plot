@@ -46,6 +46,7 @@ import os
 import os.path
 from matplotlib import pyplot as plt
 import time
+import math
 
 img2ThreshVal = 0.7
 minCellSize = 20
@@ -82,6 +83,22 @@ def main():
     parser.add_argument(
         '-d', '--debug', action='store_true', default=False,
         help='Turn on debugging'
+    )
+    parser.add_argument(
+        '--group_by', default='Well',
+        help='Column to group values by'
+    )
+    parser.add_argument(
+        '--histogram', action='append', default=list(),
+        help='Plot a histogram for the column'
+    )
+    parser.add_argument(
+        '--polar', action='append', default=list(),
+        help='Plot a polar histogram for the column'
+    )
+    parser.add_argument(
+        '-l', '--list', action='store_true', default=False,
+        help='List columns in table'
     )
     parser.add_argument(
         'object_id',
@@ -129,7 +146,6 @@ def get_table(client, args):
         params, ctx
     )
     if plate is not None:
-        print 'got the plate'
         file_annotation = next(plate.iterateAnnotationLinks()).child
         table_original_file_id = file_annotation.file.id.val
         table = sr.openTable(OriginalFileI(table_original_file_id, False))
@@ -137,56 +153,102 @@ def get_table(client, args):
         return table
     return 
 
-def get_column(matrix, columnIndex):
-     return [row[columnIndex] for row in matrix]
-    
 def run_analyser(client, args):
     table = get_table(client,args)
     try:
-        plot(client, args, table)
+        analyser = Analyser(client, args, table)
+        if args.list:
+            analyser.list()
+            return
+        analyser.plot()
     finally:
         table.close()
 
-def plot(client, args, table):    
-    columns = table.getHeaders()
-    columns_by_name = dict([
-        (v.name, {'column': v, 'index': i}) for i, v in enumerate(columns)
-    ])
-    number_of_rows = table.getNumberOfRows()
-    log.info('Number of rows: %d' % number_of_rows)
-    data = table.read([columns_by_name['Image']['index']], 0, number_of_rows)
-    #print columns_by_name.keys()
-    image_ids = set(data.columns[0].values)
-    log.info('Number of Images: %d' % len(image_ids))
-    #print 'Images: %r' % image_ids
-    #print len(data.columns[columns_by_name['polygonArea']['index']].values)
-    number_of_images  = 400 #len(image_ids)
-    bins = range(number_of_images)
-    radii = np.ones(2 * number_of_images)
-    width = 0.8
-    histPolyArea = []
-    histExentricity = []
-    histOrientation = []
-    histMeanIntCh1 = []
-    histMeanIntCh2 = []
-    
-    for i in range(number_of_images): 
-        print i,
-        rows = table.getWhereList('Image==%s' % image_ids.pop(), dict(), 0, number_of_rows, 0)
-        data = table.readCoordinates(rows)        
-        histPolyArea.append(np.average(data.columns[columns_by_name['polygonArea']['index']].values))
-        histExentricity.append(np.average(data.columns[columns_by_name['excentricity']['index']].values))
-        histOrientation.append((pi / 180) * np.average(data.columns[columns_by_name['orientation']['index']].values))
-        histOrientation.append(pi + (pi / 180) * np.average(data.columns[columns_by_name['orientation']['index']].values))        
-        histMeanIntCh1.append(np.average(data.columns[columns_by_name['meanCh1']['index']].values))
-        histMeanIntCh2.append(np.average(data.columns[columns_by_name['meanCh2']['index']].values))
-          
-    plt.subplot(231),plt.bar(bins, histPolyArea, color='r',align='center', width=width),plt.title('Avg Area')
-    plt.subplot(232),plt.bar(bins, histExentricity, color='r',align='center', width=width),plt.title('Avg Excentricity')
-    plt.subplot(233, polar=True),plt.bar(histOrientation, radii, color='r',align='center', width=pi/72),plt.title('Mean Orientation')
-    plt.subplot(234),plt.bar(bins, histMeanIntCh1, color='r',align='center', width=width),plt.title('Avg Intenisty Ch1')
-    plt.subplot(235),plt.bar(bins, histMeanIntCh2, color='r',align='center', width=width),plt.title('Avg Int Ch2 (coloc)')
-    plt.show()
+class Analyser(object):
+    def __init__(self, client, args, table):
+        self.client = client
+        self.args = args
+        self.table = table
+        self.columns = table.getHeaders()
+        self.columns_by_name = dict([
+            (v.name, {'column': v, 'index': i})
+            for i, v in enumerate(self.columns)
+        ])
+        self.number_of_rows = table.getNumberOfRows()
+
+    def get_index(self, column_name):
+        return self.columns_by_name[column_name]['index']
+
+    def group_by(self, group_by_column, metric_column):
+        by_column = dict()
+        for index in range(len(group_by_column.values)):
+            key = group_by_column.values[index]
+            group = by_column.setdefault(key, list())
+            group.append(metric_column.values[index])
+        return by_column.values()
+
+    def list(self):
+        log.info('Columns: %r' % self.columns_by_name.keys())
+
+    def plot(self):
+        metric_columns = self.args.histogram + self.args.polar
+        if len(metric_columns) == 0:
+            log.error('Select at least one column to plot!')
+            return
+
+        group_by = self.args.group_by
+        log.info('Grouping by %r' % group_by)
+        log.info('Retrieving %r for %d rows' %
+                 (metric_columns, self.number_of_rows))
+
+        data = self.table.read(
+            [self.get_index(group_by)] + [
+                self.get_index(v) for v in metric_columns
+            ], 0, self.number_of_rows + 1
+        )
+
+        group_by_column = data.columns[0]
+        group_by_column_ids = set(group_by_column.values)
+        self.number_of_group_by_column_ids = len(group_by_column_ids)
+
+        bins = range(self.number_of_group_by_column_ids)
+        radii = np.ones(2 * self.number_of_group_by_column_ids)
+
+
+        histograms = list()
+        histogram_count = len(metric_columns)
+        subplot = int(math.ceil(histogram_count / 3.0)) * 100
+        if histogram_count < 3.0:
+            subplot += histogram_count * 10
+        else:
+            subplot += 30
+
+        for index, column_name in enumerate(metric_columns):
+            width = 0.8
+            subplot += 1
+            log.info('Plotting subplot: %d' % subplot)
+            group = self.group_by(group_by_column, data.columns[index + 1])
+            polar = column_name in self.args.polar
+            plt.subplot(subplot, polar=polar)
+            plt.xlabel(group_by)
+
+            if polar:
+                histogram_data = [
+                    (pi / 180) * 2 * np.average(v) for v in group
+                ]
+                histogram_data += [
+                    pi + ((pi / 180) * 2 * np.average(v)) for v in group
+                ]
+                width = pi / 72
+                plt.bar(histogram_data, radii, color='red', align='center',
+                        width=width)
+            else:
+                plt.grid()
+                histogram_data = [np.average(v) for v in group]
+                plt.bar(bins, histogram_data, color='red', edgecolor='red',
+                        align='center', width=width)
+            plt.title(column_name)
+        plt.show()
     
 if __name__ == '__main__':
     main()
