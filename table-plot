@@ -65,6 +65,8 @@ IMAGE_QUERY = 'select i from Image as i ' \
 
 LOGGING_FORMAT = '%(asctime)s %(levelname)-7s [%(name)16s] %(message)s'
 
+AS_ALPHA = [chr(v).upper() for v in range(97, 122 + 1)]  # A-Z
+
 log = logging.getLogger('gs.table-plot')
 
 def main():
@@ -128,53 +130,58 @@ def connect(args):
     log.debug('Session key: %s' % ec.sessionUuid)
     return client
 
-def get_table(client, args):
-    '''Retrieves the OMERO.tables instance backing our results.'''
-    session = client.getSession()
-    query_service = session.getQueryService()
-    sr = session.sharedResources()
-    ctx = {'omero.group': '-1'}
-    plate_id = long(args.object_id.split(':')[1])
-    params = omero.sys.ParametersI()
-    params.addString('ns', NS)
-    params.addId(plate_id)
-    plate = query_service.findByQuery(
-        'select p from Plate as p ' \
-        'join fetch p.annotationLinks as a_link ' \
-        'join fetch a_link.child as a ' \
-        'where a.ns = :ns and p.id = :id ',
-        params, ctx
-    )
-    if plate is not None:
-        file_annotation = next(plate.iterateAnnotationLinks()).child
-        table_original_file_id = file_annotation.file.id.val
-        table = sr.openTable(OriginalFileI(table_original_file_id, False))
-        log.info('Using existing table: %d' % table_original_file_id)
-        return table
-    return 
-
 def run_analyser(client, args):
-    table = get_table(client,args)
+    analyser = Analyser(client, args)
     try:
-        analyser = Analyser(client, args, table)
         if args.list:
             analyser.list()
             return
         analyser.plot()
     finally:
-        table.close()
+        analyser.table.close()
 
 class Analyser(object):
-    def __init__(self, client, args, table):
+    def __init__(self, client, args):
         self.client = client
+        self.session = client.getSession()
+        self.query_service = self.session.getQueryService()
+        self.sr = self.session.sharedResources()
         self.args = args
-        self.table = table
-        self.columns = table.getHeaders()
+        self.get_table()
+        self.columns = self.table.getHeaders()
         self.columns_by_name = dict([
             (v.name, {'column': v, 'index': i})
             for i, v in enumerate(self.columns)
         ])
-        self.number_of_rows = table.getNumberOfRows()
+        self.number_of_rows = self.table.getNumberOfRows()
+
+    def get_table(self):
+        '''Retrieves the OMERO.tables instance backing our results.'''
+        ctx = {'omero.group': '-1'}
+        plate_id = long(self.args.object_id.split(':')[1])
+        params = omero.sys.ParametersI()
+        params.addString('ns', NS)
+        params.addId(plate_id)
+        self.plate = self.query_service.findByQuery(
+            'select p from Plate as p ' \
+            'join fetch p.wells as w ' \
+            'join fetch p.annotationLinks as a_link ' \
+            'join fetch a_link.child as a ' \
+            'where a.ns = :ns and p.id = :id ',
+            params, ctx
+        )
+        if self.plate is None:
+            raise Exception('Could not find %s!' % self.args.object_id)
+
+        self.well_names_by_id = dict()
+        for well in self.plate.iterateWells():
+            name = '%s%02d' % (AS_ALPHA[well.row.val], well.column.val + 1)
+            self.well_names_by_id[well.id.val] = name
+
+        file_annotation = next(self.plate.iterateAnnotationLinks()).child
+        table_original_file_id = file_annotation.file.id.val
+        self.table = self.sr.openTable(OriginalFileI(table_original_file_id, False))
+        log.info('Using existing table: %d' % table_original_file_id)
 
     def get_index(self, column_name):
         return self.columns_by_name[column_name]['index']
@@ -185,7 +192,7 @@ class Analyser(object):
             key = group_by_column.values[index]
             group = by_column.setdefault(key, list())
             group.append(metric_column.values[index])
-        return by_column.values()
+        return by_column.keys(), by_column.values()
 
     def list(self):
         log.info('Columns: %r' % self.columns_by_name.keys())
@@ -214,7 +221,6 @@ class Analyser(object):
         bins = range(self.number_of_group_by_column_ids)
         radii = np.ones(2 * self.number_of_group_by_column_ids)
 
-
         histograms = list()
         histogram_count = len(metric_columns)
         subplot = int(math.ceil(histogram_count / 3.0)) * 100
@@ -227,10 +233,14 @@ class Analyser(object):
             width = 0.8
             subplot += 1
             log.info('Plotting subplot: %d' % subplot)
-            group = self.group_by(group_by_column, data.columns[index + 1])
+            group_by_column_ids, group = \
+                self.group_by(group_by_column, data.columns[index + 1])
             polar = column_name in self.args.polar
             plt.subplot(subplot, polar=polar)
             plt.xlabel(group_by)
+            x_labels = [
+                self.well_names_by_id[v] for v in group_by_column_ids
+            ]
 
             if polar:
                 histogram_data = [
@@ -244,9 +254,23 @@ class Analyser(object):
                         width=width)
             else:
                 plt.grid()
-                histogram_data = [np.average(v) for v in group]
+                histogram_data = [
+                    (
+                        self.well_names_by_id[group_by_column_ids[index]],
+                        np.average(v)
+                    )
+                    for index, v in enumerate(group)
+                ]
+
+                dtype = [(group_by, 'S10'), (column_name, float)]
+                histogram_data = np.array([histogram_data], dtype=dtype)
+                histogram_data = np.sort(histogram_data, order=group_by)
+                x_labels = histogram_data[group_by].flatten()
+                histogram_data = histogram_data[column_name].flatten()
+
                 plt.bar(bins, histogram_data, color='red', edgecolor='red',
                         align='center', width=width)
+                plt.xticks(bins[::12], x_labels[::12])
             plt.title(column_name)
         plt.show()
     
