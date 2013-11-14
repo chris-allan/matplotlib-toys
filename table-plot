@@ -33,28 +33,22 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 '''
 import argparse
 import logging
-from getpass import getpass
-import omero
-import omero.clients
-from omero.model import OriginalFileI, PlateI, PlateAnnotationLinkI, ImageI, \
-                        FileAnnotationI, RoiI, PointI
-import csv
-import numpy as np
-import cv2
-import cv2.cv as cv
-import os
-import os.path
-from matplotlib import pyplot as plt
-import time
 import math
 
-img2ThreshVal = 0.7
-minCellSize = 20
-maxCellSize = 70
+from getpass import getpass
+
+
+import numpy as np
+from matplotlib import pyplot as plt
+
+import omero
+import omero.clients
+from omero.model import OriginalFileI
+
+
 pi = 3.14159265359
 
 NS = 'openmicroscopy.org/omero/bulk_annotations'
-#NS = 'openmicroscopy.org/omero/measurement'
 
 IMAGE_QUERY = 'select i from Image as i ' \
               'join fetch i.pixels as p ' \
@@ -123,7 +117,7 @@ def main():
         run_analyser(client, args)
     finally:
         client.closeSession()
-        
+
 def connect(args):
     client = omero.client(args.server, args.port)
     if args.username is not None:
@@ -167,10 +161,10 @@ class Analyser(object):
         params.addString('ns', NS)
         params.addId(plate_id)
         self.plate = self.query_service.findByQuery(
-            'select p from Plate as p ' \
-            'join fetch p.wells as w ' \
-            'join fetch p.annotationLinks as a_link ' \
-            'join fetch a_link.child as a ' \
+            'select p from Plate as p '
+            'join fetch p.wells as w '
+            'join fetch p.annotationLinks as a_link '
+            'join fetch a_link.child as a '
             'where a.ns = :ns and p.id = :id ',
             params, ctx
         )
@@ -184,7 +178,8 @@ class Analyser(object):
 
         file_annotation = next(self.plate.iterateAnnotationLinks()).child
         table_original_file_id = file_annotation.file.id.val
-        self.table = self.sr.openTable(OriginalFileI(table_original_file_id, False))
+        self.table = self.sr.openTable(
+            OriginalFileI(table_original_file_id, False))
         log.info('Using existing table: %d' % table_original_file_id)
 
     def get_index(self, column_name):
@@ -227,7 +222,6 @@ class Analyser(object):
         bins = range(self.number_of_group_by_column_ids)
         radii = np.ones(2 * self.number_of_group_by_column_ids)
 
-        histograms = list()
         histogram_count = len(metric_columns)
         subplot = int(math.ceil(histogram_count / 3.0)) * 100
         if histogram_count < 3.0:
@@ -298,6 +292,6 @@ class Analyser(object):
             else:
                 plt.title(column_name)
         plt.show()
-    
+
 if __name__ == '__main__':
     main()
